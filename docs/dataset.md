@@ -1,18 +1,18 @@
 # Dataset
 
-Pinned source: OCR-Data/ocr_data at 4cf05556e21bc54aca54a8b1f81ce172f3ef0477.
-427,825,934,227 bytes; 414 files; 103 originals and 309 augmentation TAR shards.
-Exact sample count is pending a complete scan. Repository-described per-shard
-maximum is not treated as an exact count.
+## Pinned source
 
-Inspected original sample_0000000.png/sample_0000000.json and three annotation
-pairs from original and augmented shard 001. The JSON markdown field is the
-ground-truth target, including Arabic text, diacritics and math. Metadata includes
-dimensions, layout blocks, template, fonts, language, script, direction, confidence
-scores and augmentation parameters. Original augmentation is null. Augmented
-sample IDs include suffix _01 for the inspected aug1 shard.
+- Hugging Face dataset: `OCR-Data/ocr_data`
+- Revision: `4cf05556e21bc54aca54a8b1f81ce172f3ef0477`
+- Inventory: 427,825,934,227 bytes across 414 files, including 103 original and 309 augmented TAR shards
+- The training split used in the saved October 2026 run: 3,683,080 examples
 
-Preparation must validate naming across every shard before canonicalizing source
-document IDs. Keep all versions of a document in one split, then check duplicate
-images/targets across splits. Proposed split is deterministic 90/5/5 with seed 42;
-not yet generated. Preserve the original raw files without alteration.
+The original JSON `markdown` field supplies the OCR target, including Arabic text, diacritics and mathematical notation. The source also carries layout and language metadata. Raw dataset archives and prepared images are stored outside this repository.
+
+## Preparation and integrity
+
+`scripts/prepare_dataset.py` reads the pinned source manifest, inspects TAR members, validates image/annotation pairs and uses image and annotation hashes to preserve integrity. Project storage contains the raw and prepared data; neither the files nor the object credentials are committed here.
+
+The trainer rejects sequences longer than 8,192 combined tokens instead of silently truncating targets. It preserves aspect ratio while resizing images to fit within 1,024 × 1,024. These are the recorded run settings, not evidence that all small text remains legible. Measure CER/WER and page completeness on held-out documents before making OCR-quality claims.
+
+Keep documents and augmented variants grouped in the same split. Do not place raw source annotations, customer documents or OCR images in GitHub. The numerical metric tables in `../metrics/` contain no source text or image content.

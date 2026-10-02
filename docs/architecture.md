@@ -1,10 +1,15 @@
-# Architecture
+# Training architecture
 
-Current: pinned Hugging Face files stream through access-host memory into MinIO.
-Every completed file is read back and SHA-256 checked. The access-host process is
-single-instance and stores durable per-file manifests. No full dataset is staged
-on either workstation or access-host disk.
+## Data and model flow
 
-Planned after GPU access: dedicated PVC cache → actual Arsenal training loop →
-PVC checkpoints, logs and metrics → verified MinIO artifacts → validated inference
-deployment. This part is not implemented or executed yet.
+The source model and OCR dataset are pinned by revision in `model.md` and `dataset.md`. Raw TAR shards and model files are retained in private object storage; the training job reads image byte ranges, verifies image/annotation hashes, preprocesses each page and forms supervised image-to-text examples. No source dataset or model weights are included in this Git repository.
+
+The training process runs the Qwen 3.5 multimodal model with a frozen BF16 base and custom trainable LoRA adapters in the language projections. The saved snapshot used four-rank PyTorch DDP on H200 GPUs, FLA/causal-convolution kernels, activation checkpointing, length-checked batches, AdamW and a sample-based cosine learning-rate schedule.
+
+## Storage and checkpoints
+
+OpenShift mounts the prepared project volume and injects S3-compatible credentials at runtime. Checkpoints, logs and metric records are persisted to the project PVC and verified in MinIO. The dataset, model weights, credentials and checkpoint binaries stay outside Git. See `checkpoints.md` for the saved checkpoint and resume checks.
+
+## Scope and reproducibility
+
+The repository includes application scripts, tests, documentation and numerical evidence. It does not include the Forge Arsenal runtime itself, the model repository, the raw/processed dataset, cluster credentials or deployable model weights. A matching authorized runtime, storage access, and OpenShift configuration are required to reproduce the saved run.

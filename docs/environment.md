@@ -1,15 +1,7 @@
-> Current update: the user selected priority 0 without a PriorityClass. The replacement probe succeeded. Leave all node placement to OpenShift. See scheduling.md; earlier PriorityClass blockers below are historical.
+# Runtime environment
 
-# Environment
+The 2 October 2026 training snapshot recorded Python 3.13, PyTorch 2.11.0+cu130, Transformers 5.8.0 and Forge Arsenal/CLI 2026.7.11. The optimized GPU environment used `fla-core==0.5.2`, `causal-conv1d==1.7.0` and Triton `3.7.1` on NVIDIA H200 hardware.
 
-The original environment used a remote access host and the OpenShift CLI. Host,
-identity and credential details are intentionally omitted from this repository.
-The project namespace used during the documented run was `mtrna-ns1`.
-Access-host root filesystem had approximately 26 GiB free at discovery; streaming
-avoids consuming this with model weights or raw shards. Workstation had roughly
-380 GB free; recheck before final model download.
+These package versions describe the recorded runtime, not a newly verified live environment. The repository does not vendor Forge Arsenal, its scheduler extension, the model or dataset. In particular, `lr_scheduler_basic` is provided by the authorized runtime and its source is not included in this snapshot. A normal `pip install -r requirements.txt` alone is not sufficient to reproduce the training job.
 
-No ResourceQuota or LimitRange objects were returned in this namespace. Cluster
-node capacity and other namespaces are not visible to this account. Inventory is
-recorded in evidence/cluster-inventory.json. The approved non-preempting
-PriorityClass is still unknown.
+Do not put cluster hostnames, OpenShift tokens, kubeconfigs or object-store credentials in source files. Supply credentials at runtime through an OpenShift Secret. The source launch scripts reference the original project layout and namespace; review them before use in another environment.

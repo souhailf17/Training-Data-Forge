@@ -1,11 +1,9 @@
 # Model
 
-Official repository: Qwen/Qwen3.5-9B.
-Revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a.
-Total repository size: 19,329,393,661 bytes (16 files).
-Architecture: Qwen3_5ForConditionalGeneration with vision and text configurations.
-License: Apache-2.0. The multimodal architecture supports image-to-text adaptation.
+- Official repository: `Qwen/Qwen3.5-9B`
+- Pinned revision: `c202236235762e1c871ad0ccb60c8ee5ba337b9a`
+- Inventory: 16 files, 19,329,393,661 bytes
+- Architecture: `Qwen3_5ForConditionalGeneration`, multimodal vision and language model
+- License: Apache-2.0 as recorded in the pinned repository
 
-Tokenizer assets, processor configuration, vocabulary, merges and chat template
-are included in the pinned inventory. Actual loading and training compatibility
-are pending a runtime smoke test. No base-model substitution was made.
+The saved training run loaded this pinned revision and passed a four-rank real-update preflight. It used a frozen BF16 base model and custom FP32 LoRA adapters on language-model linear projections. Base-model weights, tokenizer files, processor files and adapter checkpoints are intentionally excluded from this repository.

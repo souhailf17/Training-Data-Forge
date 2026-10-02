@@ -1,10 +1,9 @@
 {
   "checkpoint": {
-    "path": "/work/q35ocr-20260921-p560/training-fast-gpu4-m1-from6343-v1/checkpoint-7878.pt",
-    "key": "training-fast-gpu4-m1-from6343-v1/checkpoint-7878.pt",
     "sha256": "21fa40cbe4d2f1f7f787c950635f698667bc6c45cb198d1773a54b9412b1b56e",
     "global_step": 7878,
-    "full_samples": 1196288
+    "full_samples": 1196288,
+    "filename": "checkpoint-7878.pt"
   },
   "global_step": 7878,
   "processed_examples": 1196288,
@@ -21,10 +20,10 @@
   "update_seconds_last": 45.892680406570435,
   "throughput_examples_per_second": 5.496917405579604,
   "elapsed_seconds_this_continuation": 71487.46406340599,
-  "estimated_remaining_seconds_at_microbatch_1_rate": 452397.55603309604,
   "world_size": 4,
   "global_batch": 256,
   "microbatch": 1,
   "gradient_accumulation": 64,
-  "stop_reason": "requested_stop"
+  "stop_reason": "requested_stop",
+  "snapshot_note": "Historical parent checkpoint before the microbatch-3 continuation. This is not the latest progress or an ETA."
 }

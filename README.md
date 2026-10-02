@@ -2,29 +2,34 @@
 
 Code and technical evidence for adapting `Qwen/Qwen3.5-9B` to OCR with LoRA on OpenShift and NVIDIA H200 GPUs.
 
-## Current training state
+## Latest saved training snapshot
+
+These figures were saved on **2 October 2026**. They are a historical snapshot, not a live training status.
 
 - Model: `Qwen/Qwen3.5-9B`, pinned revision `c202236235762e1c871ad0ccb60c8ee5ba337b9a`
-- Method: BF16 LoRA, rank `16`, alpha `32`
-- Training context limit: `8192` combined tokens
-- Optimizer: AdamW
-- Learning-rate schedule: cosine, `1e-4` peak to `1e-5`, driven by processed examples
-- Distributed mode: four-rank DDP/HSDP replication on 4× H200
-- Requested continuation: physical microbatch `3` per GPU, accumulation `32`, global batch `384`
-- Verified retained checkpoint: step `7878`, `1,196,288 / 3,683,080` examples (`32.48%`)
-- Checkpoint SHA-256: `21fa40cbe4d2f1f7f787c950635f698667bc6c45cb198d1773a54b9412b1b56e`
-- Best evaluation loss at that checkpoint: `0.3265333178`
+- Method: BF16 frozen base with FP32 LoRA adapters, rank `16`, alpha `32`
+- Training context limit: `8192` combined tokens; oversized samples fail explicitly
+- Optimizer: AdamW; sample-based cosine schedule from `1e-4` to `1e-5`
+- Distributed mode: four-rank DDP replication on 4× NVIDIA H200
+- Physical microbatch `3` per GPU, accumulation `32`, global batch `384`
+- Saved status: `Running` at global step `8494`; `1,432,832 / 3,683,080` examples (`38.90%`)
+- Best retained checkpoint recorded at step `8487`; evaluation loss `0.293362`
+- Evaluation loss decreased from `0.326533` to `0.293362` (10.16%) on the fixed validation set
+- Latest recorded train loss `0.171045`; measured throughput `11.664 examples/second`
 
-The microbatch-3 continuation performs a real-update, finite-gradient, parameter-update, kernel-execution, checkpoint and exact-replay preflight before durable training continues. This configuration is experimental because long OCR sequences can create substantially higher memory peaks than short smoke tests.
+The four-rank run passed its saved preflight for finite gradients, real parameter updates, optimized kernel execution, checkpoint read-back and exact resume. Checkpoint weights and raw OCR examples are not stored in this repository.
 
-![Training dashboard](metrics/training-dashboard-step7878.png)
+![Training and validation dashboard](metrics/training-dashboard-step8494.png)
+
+The saved 616-update metric series, five-minute GPU sample table and compact snapshot are in `metrics/`. The earlier step-7878 dashboard is retained as historical evidence.
 
 ## Repository layout
 
 - `scripts/`: dataset preparation, optimized training, four-GPU continuation, OpenShift launcher and performance benchmark
 - `tests/`: deterministic data-stream, resume, preparation and integrity tests
 - `docs/`: architecture, model, data, multi-GPU, checkpoint and troubleshooting notes
-- `metrics/`: training dashboard and checkpoint-7878 metric summaries
+- `evidence/`: pinned model file-name/hash inventory used by the launcher
+- `metrics/`: current and historical training summaries, per-update metrics, GPU samples and dashboards
 
 ## Data and secrets
 
@@ -63,13 +68,7 @@ The launcher requests four GPUs and leaves node placement to the OpenShift sched
 
 ## Validation evidence
 
-At checkpoint 7878:
+The 2 October snapshot evaluates on the same fixed 256-example validation set. A separate, group-disjoint held-out OCR evaluation with CER/WER and page-completeness measurements remains necessary to assess OCR quality. Lower cross-entropy alone is not an OCR accuracy score.
 
-- latest train loss: `0.150908`
-- median train loss over the last 100 updates: `0.150066`
-- evaluation loss: `0.362801 → 0.326533`
-- relative evaluation-loss improvement: approximately `10.0%`
-- measured throughput for the prior microbatch-1 continuation: `5.497 examples/s`
-
-Raw training data is not published here. The validation CSV contains only numerical training metrics.
+Raw training data is not published here. The committed metric tables contain numerical training and GPU telemetry only; checkpoint weights remain in private storage.
 

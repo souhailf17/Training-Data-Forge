@@ -1,4 +1,6 @@
-> Current update: the user selected priority 0 without a PriorityClass. The replacement probe succeeded. Leave all node placement to OpenShift. See scheduling.md; earlier PriorityClass blockers below are historical.
+> Historical scheduling note: a replacement probe later succeeded with scheduler-selected placement. The issue list below is a discovery log; do not treat it as the current job state.
+
+> The issue list below is a historical discovery log, not live status. The 2 October 2026 saved run configuration and verified continuation are documented in [`training.md`](training.md).
 
 # Troubleshooting
 

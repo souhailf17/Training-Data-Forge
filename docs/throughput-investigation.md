@@ -1,4 +1,6 @@
-# Qwen OCR throughput investigation — 24 September 2026
+# Qwen OCR throughput investigation — initial report, 24 September 2026
+
+> Historical investigation. Its benchmark plan and pilot estimates predate the optimized four-H200 run. The latest measured state and updated recommendations are in [the 2 October review](optimization-review-2026-10-02.md) and [training snapshot](../metrics/training-snapshot-2026-10-02.json). Do not treat the earlier status, absent-kernel claim or proposed configuration as current.
 
 ## Findings backed by this project's code/logs
 

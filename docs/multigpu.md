@@ -1,39 +1,24 @@
-# Four-GPU migration
+# Multi-GPU training
 
-Update: distributed smoke v5 passed all four ranks with exactly zero resume
-error. Enabling deterministic algorithms in every spawned rank resolved the
-earlier numerical discrepancy. Job `q35ocr-20260921-p560-train4-v1` was launched
-from verified checkpoint step750 (5992 consumed samples). The original
-`q35ocr-20260921-p560-train-v1` is suspended. OpenShift selected worker9; no
-worker was specified in the submitted job.
+## Recorded configuration
 
-Monitor: `oc -n mtrna-ns1 logs -f job/q35ocr-20260921-p560-train4-v1`.
+The 2 October 2026 run snapshot used four ranks with PyTorch DistributedDataParallel replication on four NVIDIA H200 GPUs. Each GPU processed a physical microbatch of three examples for 32 gradient-accumulation steps: `4 × 3 × 32 = 384` examples per optimizer update. The model was replicated; this was not full parameter sharding.
 
-The user authorized accelerating training using multiple GPUs. A scheduler-chosen
-probe confirmed four NVIDIA H200 NVL devices. No node name, node selector,
-affinity, or PriorityClass was submitted. Priority remains zero.
+DDP, FLA and causal-convolution kernels were exercised by the saved real-update preflight. The report also recorded finite gradients, a parameter update, exact four-rank checkpoint replay and verified PVC/S3 checkpoint round trip. See `../metrics/training-snapshot-2026-10-02.json` for numerical details.
 
-`distributed_ocr.py` uses the actual Arsenal launcher and training step with
-PyTorch DistributedDataParallel. Four ranks share synchronized adapters and
-consume disjoint samples. Two microbatches per rank preserve effective batch8.
-The original one-GPU run remains active until a distributed smoke test passes.
+GPU utilization was sampled at approximately five-second intervals for about five minutes. Mean reported utilization by GPU was 83.77%, 80.93%, 75.32% and 76.65%. These are sampled kernel-activity readings, not a measure of theoretical compute efficiency. The per-sample data is in `../metrics/gpu-samples-2026-10-02.csv`.
 
-The node hosting four GPUs cannot connect directly to the external MinIO IP.
-A project-owned, bucket-restricted TCP relay provides in-cluster connectivity.
-Its Service sends traffic only to replicas whose upstream connectivity check
-passes. It forwards existing S3 authentication unchanged. No unrelated relay,
-network policy, service or workload is modified.
+## Correctness requirements
 
-The smoke test checks finite gradients, parameter updates, rank synchronization,
-restored update consistency, and S3 artifact checksums. Distributed loader tests
-exercise exact disjointness and continuation from a saved global cursor.
+- Every rank must use the same model, optimizer, scheduler and update count.
+- Each rank consumes a disjoint portion of the deterministic data stream.
+- Intermediate accumulation microsteps use DDP `no_sync`; gradient synchronization occurs at the update boundary.
+- Any explicit collective in the training loop must be called by every rank in the same order.
+- Checkpoints preserve the cursor and per-rank random state so resumed training does not silently repeat or skip samples.
+- A successful launch requires finite gradients, an actual parameter update, matching rank progress and successful checkpoint verification.
 
-Migration verifies the existing local and S3 checkpoint before suspending only
-the project's one-GPU job. Unsaved samples are replayed from the last durable
-checkpoint. The same96Gi PVC is then attached by OpenShift to the new job.
-After migration, four-rank checkpoints gather per-rank RNG state, use the highest
-consumed global cursor, and persist the synchronized optimizer/adapter state.
+The launcher is fixed to four GPUs and the original OpenShift namespace. Review it before reuse, and let the cluster scheduler select nodes. The repository contains no access token or S3 key; runtime credentials must be supplied through an authorized Secret.
 
-Performance must be measured after migration; GPU count alone is not a reliable
-speedup guarantee. Existing Qwen linear-attention optimized kernels are absent
-from the runtime, which currently uses the Transformers PyTorch fallback.
+## Performance interpretation
+
+GPU count alone does not establish speedup. Compare end-to-end examples/s and supervised non-padding tokens/s on the same sample distribution. Capture update median/p95, rank skew, data wait, GPU memory and a bounded profiler trace. Balance variable text and visual-token lengths without omitting long pages. See [`optimization-review-2026-10-02.md`](optimization-review-2026-10-02.md).

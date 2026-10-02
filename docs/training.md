@@ -1,46 +1,46 @@
-> Current update: the user selected priority 0 without a PriorityClass. The replacement probe succeeded. Leave all node placement to OpenShift. See scheduling.md; earlier PriorityClass blockers below are historical.
+# Training configuration and saved run
 
-# Training — full job launched after successful Arsenal smoke
+## Configuration
 
-Current implementation: `scripts/arsenal_ocr.py`, `scripts/train_full.py`.
-Smoke job `q35ocr-20260921-p560-smoke-v2` passed every gate, including identical
-resumed parameter updates (maximum error 0), finite gradients, assistant-only
-labels and PVC/S3 checkpoint round trip. H200 peak allocation: 48,147,557,376 bytes.
+The following configuration was recorded in the 2 October 2026 snapshot:
 
-Full job: `q35ocr-20260921-p560-train-v1`. One epoch across 3,683,080 train
-examples, deterministic shard/row shuffle, BF16 frozen model, float32 rank16
-alpha32 language adapters (29,097,984 parameters), no dropout, AdamW LR1e-4,
-weight decay .01, warmup500, cosine decay, microbatch1, accumulation8, clip1.
-Images fit within 1024x1024 preserving aspect ratio; exact labels are preserved.
-Sequences above8192tokens cause explicit failure, never silent truncation.
+| Setting | Value |
+|---|---|
+| Model | `Qwen/Qwen3.5-9B`, revision `c202236235762e1c871ad0ccb60c8ee5ba337b9a` |
+| Training objective | Image-to-text OCR; assistant answer tokens supervised |
+| Base weights | Frozen, BF16 |
+| Adapters | LoRA rank 16, alpha 32, scale 2, no dropout |
+| Adapted layers | `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj` in language-model layers |
+| Optimizer | AdamW, weight decay 0.01, gradient clipping 1.0 |
+| Learning rate | Sample-based cosine schedule, peak `1e-4`, minimum `1e-5`; restored from checkpoint |
+| Distributed | Four-rank DDP replication on four H200 GPUs |
+| Per-GPU microbatch | 3 examples |
+| Gradient accumulation | 32 microsteps |
+| Global batch | 384 examples per optimizer update |
+| Maximum combined input length | 8192 tokens; oversized samples fail instead of being silently truncated |
+| Image preprocessing | Aspect-preserving thumbnail, maximum 1024 × 1024 |
+| Activation checkpointing | Enabled, non-reentrant |
 
-Validation monitors64distinct groups across32shards at baseline and every1000
-updates. Final held-out OCR evaluation remains a separate completion gate.
-Checkpoints after the first update and every250steps include adapters, optimizer,
-loader, clock and RNG; all are uploaded with full checksum read-back. Three recent
-local checkpoints remain on PVC, while S3 retains all copies.
+The adapter implementation keeps trainable parameters in FP32 and computes its LoRA branch in FP32, while the frozen base model runs in BF16. This is a custom LoRA implementation, not a dependency on the Hugging Face PEFT package.
 
-PVC root: `/work/q35ocr-20260921-p560`; logs in `logs/training.log`,
-`logs/training-status.json`, `logs/metrics.jsonl`, `logs/validation.jsonl`.
-Resume pointer: `checkpoints/latest.json`. Never launch a second live trainer.
-Use `oc -n mtrna-ns1 logs -f job/q35ocr-20260921-p560-train-v1` to monitor.
+## Snapshot as of 2 October 2026
 
-The submitted job has no node selector or affinity. Admission adds the namespace
-tenant selector `atlasx.ma/tenant=mtrna` to the actual pod. No specific worker is
-requested. The scheduler selected worker7 for this run. Pod priority is 0.
-The SDK clock is one-based; status.step records the next SDK step after an update.
+The saved status file reported the job as running at global step 8,494. The deterministic full pass had consumed 1,432,832 of 3,683,080 training examples (38.90%). The continuation began from a verified checkpoint at step 7,878 and 1,196,288 examples. This repository does not establish the job's current state after that snapshot.
 
-The following describes the historical initial probe only:
+The best checkpoint marker recorded step 8,487, 1,430,144 examples and validation loss 0.293362. The recorded baseline validation loss was 0.326533, a 10.16% decrease. Latest training loss was 0.171045. The 616 updates in this run segment averaged 32.675 seconds per update and 11.664 examples per second end to end.
 
-The GPU/runtime probe was rejected before pod creation because the cluster
-requires an approved non-preempting PriorityClass. It is suspended. No training
-method or GPU allocation has been finalized. The PVC budget provisionally targets
-LoRA; full tuning has not been sized or approved by a memory measurement.
+The validation loss is token-weighted over a fixed 256-example set; train loss is logged as a mean of microbatch losses. Their absolute gap should not be interpreted as an overfitting measurement. OCR character/word error rate and page completeness require separate held-out inference evaluation.
 
-Inspect installed Arsenal version, its trainer lifecycle, optimizer, checkpoint
-and loader-state interfaces before writing the training integration. Existing
-Gemma scripts are reference evidence only. Existing Qwen scripts use ms-swift,
-which is not sufficient evidence of Arsenal training integration.
+See [`../metrics/training-snapshot-2026-10-02.json`](../metrics/training-snapshot-2026-10-02.json), [`../metrics/training-metrics-step7879-8494.csv`](../metrics/training-metrics-step7879-8494.csv), and the [dashboard](../metrics/training-dashboard-step8494.png). GPU telemetry covers 60 samples per GPU across approximately five minutes; sample timing averaged 5.244 seconds.
 
-Full training must follow the smoke gates in README.md, including backward,
-parameter updates, complete checkpoint reload, data pairing, and durable storage.
+## Checkpointing and recovery
+
+Training checkpoints contain adapter weights, optimizer, scheduler/clock, dataloader cursor and per-rank RNG state. The saved continuation preflight verified the parent checkpoint's local and S3 checksums, finite gradients, parameter updates, execution of the optimized FLA/causal-convolution kernels, and four-rank replay error of zero. The corresponding saved best-checkpoint SHA-256 is in the numerical snapshot. Model weights and checkpoint files are intentionally excluded from GitHub.
+
+Do not reuse a saved status JSON as live status. Before resuming, inspect the actual OpenShift Job and all rank logs, verify the retained checkpoint against its SHA-256 in both storage locations, and preserve the exact dataset cursor and scheduler history.
+
+## Runtime dependencies and reproducibility
+
+The scripts expect the prepared project volume and a Forge Arsenal runtime. The recorded optimized runtime used Arsenal/Forge 2026.7.11, PyTorch 2.11.0+cu130, `fla-core` 0.5.2, `causal-conv1d` 1.7.0 and Triton 3.7.1. These runtime packages and model/data artifacts are not vendored in this repository. The scheduler module `lr_scheduler_basic` is provided by the training runtime and is not present among the project sources captured here; obtain that dependency from the authorized runtime before attempting reproduction.
+
+Provide S3 credentials through an OpenShift Secret at runtime; never put tokens or credential values in a manifest or Git. Launch scripts refer to the original project namespace and storage conventions and need review before reuse in another cluster.

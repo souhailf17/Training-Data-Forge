@@ -31,3 +31,14 @@ venv/
 .DS_Store
 Thumbs.db
 
+
+# Local data, cluster logs and credentials
+.aws/
+.kube/
+kubeconfig*
+*.log
+*.jsonl
+*.tar
+*.tar.gz
+*.tgz
+*.pdf
