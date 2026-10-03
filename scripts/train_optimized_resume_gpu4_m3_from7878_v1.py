@@ -1,6 +1,7 @@
-"""Continue the verified four-rank pass with physical microbatch three.
+"""Continue a verified four-rank pass with a configurable physical microbatch.
 
-The global batch is 384: 4 ranks * 3 samples * 32 accumulation steps.
+The default global batch is 384: 4 ranks * 3 samples * 32 accumulation steps.
+Set MICROBATCH=4 for an isolated 4 * 4 * 24 preflight-only candidate.
 The retained parent marker is verified on PVC and S3 before a real-update,
 checkpoint/replay and kernel-execution gate is run. The gate is rolled back
 before durable continuation so it never consumes training coverage twice.
@@ -23,21 +24,31 @@ import torch
 import torch.distributed as dist
 
 import train_optimized as base
+from training_config import accumulation_steps
 
 
 RANKS = int(os.environ.get("TRAIN_RANKS", "4"))
 assert RANKS == 4, "This continuation is approved and tested for exactly four DDP ranks"
-MICROBATCH = 3
+MICROBATCH = int(os.environ.get("MICROBATCH", "3"))
 TOTAL = 3_683_080
 BATCH = 384
-ACCUMULATION = BATCH // (RANKS * MICROBATCH)
-RUN = base.SOURCE / "training-fast-gpu4-m3-from7878-v1"
-PREFIX = "training-fast-gpu4-m3-from7878-v1/"
-PARENT_MARKER = base.SOURCE / "training-fast-gpu4-m1-from6343-v1/latest.json"
+ACCUMULATION = accumulation_steps(BATCH, RANKS, MICROBATCH)
+os.environ["Q35OCR_CONFIGURED_ACCUMULATION"] = str(ACCUMULATION)
+os.environ.setdefault("Q35OCR_PIN_EACH_SAMPLE", "0")
+PARENT_MARKER = Path(os.environ.get(
+    "Q35OCR_PARENT_MARKER",
+    str(base.SOURCE / "training-fast-gpu4-m1-from6343-v1/latest.json"),
+))
 PARENT = json.loads(PARENT_MARKER.read_text())
-assert PARENT["global_step"] == 7878, PARENT
-assert PARENT["full_samples"] == 1_196_288, PARENT
-assert Path(PARENT["path"]).name == "checkpoint-7878.pt", PARENT
+assert 0 <= PARENT["full_samples"] < TOTAL, PARENT
+assert Path(PARENT["path"]).name == f"checkpoint-{PARENT['global_step']}.pt", PARENT
+if "Q35OCR_PARENT_STEP" in os.environ:
+    assert PARENT["global_step"] == int(os.environ["Q35OCR_PARENT_STEP"]), PARENT
+base.PARENT_STEP = PARENT["global_step"]
+base.PARENT_SHA = PARENT["sha256"]
+DEFAULT_RUN_NAME = f"training-fast-gpu4-m{MICROBATCH}-from{PARENT['global_step']}-v1"
+RUN = base.SOURCE / os.environ.get("Q35OCR_RUN_DIR_NAME", DEFAULT_RUN_NAME)
+PREFIX = RUN.name + "/"
 
 # The imported implementation deliberately keeps its run globals explicit.
 # Redirect those globals to this isolated continuation before constructing it.
@@ -59,20 +70,7 @@ base.upload = upload
 
 
 def collate(rows, pad_token_id):
-    result = {}
-    width = max(row["input_ids"].shape[1] for row in rows)
-    for key in rows[0]:
-        values = [row[key] for row in rows]
-        if key in ("input_ids", "attention_mask", "labels", "mm_token_type_ids", "token_type_ids"):
-            fill = -100 if key == "labels" else pad_token_id if key == "input_ids" else 0
-            values = [
-                torch.nn.functional.pad(value, (0, width - value.shape[1]), value=fill)
-                for value in values
-            ]
-        elif key not in ("pixel_values", "image_grid_thw"):
-            raise ValueError("Unvalidated processor batch field: " + key)
-        result[key] = torch.cat(values, dim=0)
-    return base.arsenal_ocr.OCRBatch(result)
+    return base.arsenal_ocr.collate_ocr(rows, pad_token_id, pin_memory=True)
 
 
 class BatchedStream:
@@ -115,11 +113,11 @@ class BatchedStream:
             yield collate(rows, self.inner.processor.tokenizer.pad_token_id)
 
 
-def spawn_m3(self):
+def spawn_microbatched(self):
     return base.OrderedPrefetch(BatchedStream(base.FastStream(self.model_path)), depth=4)
 
 
-base.FastData.spawn = spawn_m3
+base.FastData.spawn = spawn_microbatched
 
 
 class ResumeTrainer(base.FastTrainer):
@@ -132,6 +130,21 @@ class ResumeTrainer(base.FastTrainer):
             base.verify_s3(entry["key"], entry["sha256"])
         dist.barrier()
         state = torch.load(path, map_location="cpu", weights_only=False)
+        saved_optimization = state.get("optimization_settings")
+        if saved_optimization is not None:
+            requested_optimization = {
+                "global_batch": BATCH,
+                "microbatch": MICROBATCH,
+                "accumulation": ACCUMULATION,
+                "lora_compute_dtype": os.environ.get("Q35OCR_LORA_COMPUTE_DTYPE", "fp32"),
+                "rank_sync_interval": int(os.environ.get("Q35OCR_RANK_SYNC_INTERVAL", "16")),
+            }
+            parent_migration = entry.get("global_step") == PARENT["global_step"] and entry.get("sha256") == PARENT["sha256"]
+            assert parent_migration or saved_optimization == requested_optimization, (
+                "Refusing exact resume with changed optimization settings",
+                saved_optimization,
+                requested_optimization,
+            )
         with torch.no_grad():
             for name, parameter in self.models["model"].named_parameters():
                 if parameter.requires_grad:
@@ -186,9 +199,7 @@ class ResumeTrainer(base.FastTrainer):
         self.clock.step_index += 1
         self.metrics.clear()
         self.consumed += count
-        stats = torch.tensor([self.loss_sum, self.loss_count], device=self.device, dtype=torch.float64)
-        dist.all_reduce(stats)
-        return float(stats[0] / stats[1])
+        return self.mean_accumulated_loss()
 
     def preflight_resume(self):
         state = torch.load(PARENT["path"], map_location="cpu", weights_only=False)
@@ -196,6 +207,8 @@ class ResumeTrainer(base.FastTrainer):
         assert state["full_samples"] == PARENT["full_samples"]
         assert state["loader"]["count"] == PARENT["full_samples"]
         assert PARENT["full_samples"] % RANKS == 0
+        gpu_name = torch.cuda.get_device_name()
+        assert "H200" in gpu_name.upper(), f"Expected scheduler-allocated H200s, got {gpu_name}"
 
         self.restore_full(PARENT)
         baseline = self.evaluate()
@@ -207,7 +220,7 @@ class ResumeTrainer(base.FastTrainer):
         assert any(not torch.equal(original[name], value) for name, value in self.adapter_state().items())
         del original
 
-        checkpoint = self.save_full("preflight-4gpu-m3", publish=False)
+        checkpoint = self.save_full(f"preflight-4gpu-m{MICROBATCH}", publish=False)
         expected_loss = self.update(BATCH)
         expected = self.adapter_state()
         self.restore_full(checkpoint)
@@ -342,7 +355,7 @@ class ResumeTrainer(base.FastTrainer):
                 if save or updates % 10 == 0:
                     upload(RUN / "metrics.jsonl")
                     upload(RUN / "status.json")
-                print("GPU4_M3_TRAIN_METRIC", json.dumps(entry), flush=True)
+                print(f"GPU4_M{MICROBATCH}_TRAIN_METRIC", json.dumps(entry), flush=True)
             if stop:
                 reason = stop
                 break
@@ -394,6 +407,8 @@ def main():
         "global_batch": BATCH,
         "microbatch": MICROBATCH,
         "accumulation": ACCUMULATION,
+        "lora_compute_dtype": os.environ.get("Q35OCR_LORA_COMPUTE_DTYPE", "fp32"),
+        "rank_sync_interval": int(os.environ.get("Q35OCR_RANK_SYNC_INTERVAL", "16")),
         "kernels": {"fla-core": "0.5.2", "causal-conv1d": "1.7.0", "triton": base.triton.__version__},
     })
     upload(RUN / "started.json")

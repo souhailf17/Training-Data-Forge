@@ -13,10 +13,11 @@ from pathlib import Path
 from ordered_prefetch import OrderedPrefetch
 
 ROOT = Path(__file__).parent
+SCRIPT_ROOT = ROOT.parent / "scripts"
 
 
 def class_source(filename, name):
-    text = (ROOT/filename).read_text()
+    text = (SCRIPT_ROOT/filename).read_text()
     node = next(n for n in ast.parse(text).body if isinstance(n, ast.ClassDef) and n.name == name)
     return ast.get_source_segment(text, node)
 

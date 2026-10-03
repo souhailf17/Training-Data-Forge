@@ -118,14 +118,30 @@ class PilotConfig(BaseConfig):
     model:OCRModel
 
 class PilotTrainer(AccumulationMixin,DistributedTraining):
+    def record_window_loss(self,loss):
+        finite=torch.isfinite(loss.detach()).all().to(torch.int32)
+        self._window_finite=finite if self._window_finite is None else torch.minimum(self._window_finite,finite)
+        self.last_loss=loss.detach()
+        if not isinstance(self.loss_sum,torch.Tensor):
+            self.loss_sum=torch.zeros((),device=loss.device,dtype=torch.float64)
+        self.loss_sum.add_(loss.detach().to(dtype=torch.float64))
+        self.loss_count+=1
     def compute_loss(self,batch):
         with torch.autocast('cuda',dtype=torch.bfloat16):loss=self.models['model'](batch)
-        finite=torch.isfinite(loss).to(torch.int32)
-        dist.all_reduce(finite,op=dist.ReduceOp.MIN)
-        assert finite.item(), 'Nonfinite loss on at least one rank'
-        self.last_loss=float(loss.detach())
-        self.loss_sum+=float(loss.detach()); self.loss_count+=1
+        self.record_window_loss(loss)
         return loss
+    def mean_accumulated_loss(self):
+        """Reduce per-microstep loss statistics once after the optimizer update."""
+        if self.loss_count<=0:raise RuntimeError('No microbatch losses were recorded')
+        loss_sum=self.loss_sum
+        if not isinstance(loss_sum,torch.Tensor):
+            loss_sum=torch.tensor(float(loss_sum),device=self.device,dtype=torch.float64)
+        else:
+            loss_sum=loss_sum.to(device=self.device,dtype=torch.float64)
+        count=torch.tensor(float(self.loss_count),device=self.device,dtype=torch.float64)
+        stats=torch.stack((loss_sum,count))
+        if dist.is_available() and dist.is_initialized():dist.all_reduce(stats)
+        return float((stats[0]/stats[1]).item())
     def lr_scheduler_step(self):
         self.lr_scheduler.set_lr(step=1+(self.start_samples+self.pilot_samples)//8)
     def evaluate(self):
@@ -184,8 +200,7 @@ class PilotTrainer(AccumulationMixin,DistributedTraining):
             if self.decision(elapsed+max_seconds+600>=9*3600):reason='time_budget';break
             begin=time.time(); self.loss_sum=0.; self.loss_count=0
             self.step(iterator); self.clock.step_index+=1; self.metrics.clear(); self.pilot_samples+=256
-            stats=torch.tensor([self.loss_sum,self.loss_count],device=self.device,dtype=torch.float64); dist.all_reduce(stats)
-            loss=float(stats[0]/stats[1]); history.append(loss)
+            loss=self.mean_accumulated_loss(); history.append(loss)
             entry={'pilot_update':update,'global_step':self.clock.step_index,'train_loss':loss,'learning_rate':self.optimizer.param_groups[0]['lr'],'pilot_samples':self.pilot_samples}
             stop=None
             if len(history)>=13 and all(x>3*statistics.median(history[-13:-3]) for x in history[-3:]):stop='divergent_loss'

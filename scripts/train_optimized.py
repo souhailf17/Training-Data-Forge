@@ -39,6 +39,8 @@ RUN = SOURCE / 'training-fast-v1'
 TOTAL = 3683080
 BATCH = 255  # 85 examples per rank with three GPUs; preserves equal DDP work.
 RANKS = int(os.environ.get('TRAIN_RANKS', '4'))
+PARENT_STEP = None
+PARENT_SHA = None
 assert 1 <= RANKS <= 4
 SOURCE_SHA = 'd9a45e38c05720708aaf24282f93050920a158aae8987aa449395c04d9597117'
 SOURCE_KEY = 'pilot-10h-v1/checkpoint-3205.pt'
@@ -93,7 +95,10 @@ class FastStream(RankStream):
 
     def __iter__(self):
         for batch in super().__iter__():
-            yield type(batch)({k: v.pin_memory() for k, v in batch.items()})
+            if os.environ.get('Q35OCR_PIN_EACH_SAMPLE', '1') == '1':
+                yield type(batch)({k: v.pin_memory() for k, v in batch.items()})
+            else:
+                yield batch
 
 
 class FastData(BaseDataloaderConfig):
@@ -134,10 +139,9 @@ class FastTrainer(PilotTrainer):
         if batch is None:
             # All ranks must enter the DDP reduction for the final remainder,
             # while ranks without a real sample contribute exactly zero.
-            self.last_loss = 0.0
-            self.loss_sum += 0.0
-            self.loss_count += 1
-            return sum((parameter.float().sum() * 0.0) for parameter in self.get_parameters())
+            loss=sum((parameter.float().sum() * 0.0) for parameter in self.get_parameters())
+            self.record_window_loss(loss)
+            return loss
         return super().compute_loss(batch)
 
     def restore_full(self, entry):
@@ -149,6 +153,23 @@ class FastTrainer(PilotTrainer):
         dist.barrier()
         DistributedTraining.restore(self, path)
         state = torch.load(path, map_location='cpu', weights_only=False)
+        saved_optimization = state.get('optimization_settings')
+        if saved_optimization is not None:
+            requested_optimization = {
+                'global_batch': BATCH,
+                'microbatch': int(os.environ.get('MICROBATCH', '1')),
+                'accumulation': int(os.environ.get('Q35OCR_CONFIGURED_ACCUMULATION', self.config.gradient_accumulation.count)),
+                'lora_compute_dtype': os.environ.get('Q35OCR_LORA_COMPUTE_DTYPE', 'fp32'),
+                'rank_sync_interval': int(os.environ.get('Q35OCR_RANK_SYNC_INTERVAL', '16')),
+            }
+            parent_migration = PARENT_STEP is not None and (
+                entry.get('global_step') == PARENT_STEP and entry.get('sha256') == PARENT_SHA
+            )
+            assert parent_migration or saved_optimization == requested_optimization, (
+                'Refusing exact resume with changed optimization settings',
+                saved_optimization,
+                requested_optimization,
+            )
         self.consumed = state['full_samples']
         self.source_samples = state['source_samples']
         assert self.dataloader.count == self.consumed
@@ -177,6 +198,13 @@ class FastTrainer(PilotTrainer):
                       'world_size': RANKS, 'scheduler_step': min(460385, 1 + (self.source_samples + self.consumed) // 8),
                      'source_samples': self.source_samples, 'full_samples': self.consumed,
                      'source_checkpoint_sha256': SOURCE_SHA, 'config': self.config.model_dump_json(),
+                 'optimization_settings': {
+                     'global_batch': BATCH,
+                     'microbatch': int(os.environ.get('MICROBATCH', '1')),
+                     'accumulation': int(os.environ.get('Q35OCR_CONFIGURED_ACCUMULATION', self.config.gradient_accumulation.count)),
+                     'lora_compute_dtype': os.environ.get('Q35OCR_LORA_COMPUTE_DTYPE', 'fp32'),
+                     'rank_sync_interval': int(os.environ.get('Q35OCR_RANK_SYNC_INTERVAL', '16')),
+                 },
                      'data_complete_sha256': digest(SOURCE / 'data/COMPLETE.json')}
             temp = path.with_suffix('.partial')
             torch.save(state, temp)
@@ -243,9 +271,7 @@ class FastTrainer(PilotTrainer):
         self.clock.step_index += 1
         self.metrics.clear()
         self.consumed += count
-        stats = torch.tensor([self.loss_sum, self.loss_count], device=self.device, dtype=torch.float64)
-        dist.all_reduce(stats)
-        return float(stats[0] / stats[1])
+        return self.mean_accumulated_loss()
 
     def preflight(self):
         source = SOURCE / SOURCE_KEY
@@ -293,6 +319,22 @@ class FastTrainer(PilotTrainer):
 
     def _train(self):
         try:
+            if os.environ.get('Q35OCR_PREFLIGHT_ONLY', '0') == '1':
+                preflight = getattr(self, 'preflight_resume', self.preflight)
+                preflight()
+                if dist.get_rank() == 0:
+                    write(RUN / 'result.json', {
+                        'state': 'preflight_passed_only',
+                        'full_training_started': False,
+                        'world_size': RANKS,
+                        'global_batch': BATCH,
+                        'microbatch': int(os.environ.get('MICROBATCH', '1')),
+                    })
+                    upload(RUN / 'result.json')
+                dist.barrier()
+                self.close_loader()
+                self.clock.stop()
+                return
             self.run_full()
         except BaseException as exc:
             import traceback
@@ -385,6 +427,8 @@ def main():
     write(RUN / 'started.json', {'time': time.time(), 'source_checkpoint': SOURCE_KEY, 'source_sha256': SOURCE_SHA,
                                 'coverage': 'One new complete pass of 3683080 examples, initialized from pilot3205',
                                 'world_size': RANKS, 'global_batch': BATCH, 'microbatch': 1, 'accumulation': BATCH // RANKS,
+                                'lora_compute_dtype': os.environ.get('Q35OCR_LORA_COMPUTE_DTYPE','fp32'),
+                                'rank_sync_interval': int(os.environ.get('Q35OCR_RANK_SYNC_INTERVAL','16')),
                                 'kernels': {'fla-core': '0.5.2', 'causal-conv1d': '1.7.0', 'triton': triton.__version__}})
     upload(RUN / 'started.json')
     config = FastConfig(run_directory=RUN/'arsenal', model=OCRModel(model_path=str(SOURCE/'model')),

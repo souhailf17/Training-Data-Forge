@@ -21,7 +21,7 @@ The following configuration was recorded in the 2 October 2026 snapshot:
 | Image preprocessing | Aspect-preserving thumbnail, maximum 1024 × 1024 |
 | Activation checkpointing | Enabled, non-reentrant |
 
-The adapter implementation keeps trainable parameters in FP32 and computes its LoRA branch in FP32, while the frozen base model runs in BF16. This is a custom LoRA implementation, not a dependency on the Hugging Face PEFT package.
+The saved run kept trainable parameters in FP32 and computed its LoRA branch in FP32, while the frozen base model ran in BF16. The optimization candidate adds `Q35OCR_LORA_COMPUTE_DTYPE=bf16` for adapter matrix operations while preserving FP32 parameter storage. The default remains FP32; enable the candidate only after the GPU preflight and OCR quality gates in [`optimization-branch-2026-10-03.md`](optimization-branch-2026-10-03.md). This is a custom LoRA implementation, not a dependency on the Hugging Face PEFT package.
 
 ## Snapshot as of 2 October 2026
 

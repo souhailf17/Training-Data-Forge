@@ -71,10 +71,14 @@ class AccumulationMixin:
         return self.models['model'].no_sync() if self._micro_index<self.config.gradient_accumulation.count else contextlib.nullcontext()
     def step(self,iterator):
         self._micro_index=0
+        self._window_finite=None
+        interval=1 if os.environ.get('TRAIN_MODE','smoke')=='smoke' else int(os.environ.get('Q35OCR_RANK_SYNC_INTERVAL','16'))
+        if interval<1:raise ValueError('Q35OCR_RANK_SYNC_INTERVAL must be positive')
         def synchronized():
             for index in range(self.config.gradient_accumulation.count):
-                interval=1 if os.environ.get('TRAIN_MODE','smoke')=='smoke' else 16
                 if index%interval==0:
+                    # Preserve the proven rank-skew guard until matched H200
+                    # profiling demonstrates that removing this sync is safe.
                     torch.cuda.synchronize()
                     dist.barrier()
                 yield next(iterator)

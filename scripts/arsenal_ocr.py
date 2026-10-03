@@ -1,12 +1,12 @@
 """Real Arsenal trainer: BF16 Qwen OCR with float32 low-rank adapters."""
-import hashlib, io, json, math, os, random
+import hashlib, io, json, os, random
 from pathlib import Path
 from typing import Literal
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
+from lora import LowRankLinear
 from arsenal.config.base import BaseConfig
 from arsenal.config.compile import CompileConfig
 from arsenal.config.dataloader import BaseDataloaderConfig
@@ -20,24 +20,6 @@ from lr_scheduler_basic import CosineSchedulerConfig
 from stage_training import ROOT, BUCKET
 from s3_common import client
 
-class LowRankLinear(torch.nn.Module):
-    def __init__(self, base, rank=16, alpha=32):
-        super().__init__()
-        self.base = base
-        self.lora_a = torch.nn.Parameter(torch.empty(rank, base.in_features, device=base.weight.device, dtype=torch.float32))
-        self.lora_b = torch.nn.Parameter(torch.zeros(base.out_features, rank, device=base.weight.device, dtype=torch.float32))
-        torch.nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
-        self.scale = alpha / rank
-    @property
-    def weight(self): return self.base.weight
-    @property
-    def bias(self): return self.base.bias
-    def forward(self, x):
-        result = self.base(x)
-        with torch.autocast('cuda', enabled=False):
-            update = F.linear(F.linear(x.float(), self.lora_a), self.lora_b) * self.scale
-        return result + update.to(result.dtype)
-
 class OCRModel(ArsenalModule):
     model_path: str
     def setup(self):
@@ -48,6 +30,9 @@ class OCRModel(ArsenalModule):
             self.hf = Qwen3_5ForConditionalGeneration.from_pretrained(self.model_path, local_files_only=True, dtype=dtype, attn_implementation='sdpa')
         self.hf.to(device)
         self.hf.requires_grad_(False)
+        lora_compute_dtype = os.environ.get('Q35OCR_LORA_COMPUTE_DTYPE', 'fp32').lower()
+        if lora_compute_dtype not in {'fp32', 'bf16'}:
+            raise ValueError('Q35OCR_LORA_COMPUTE_DTYPE must be fp32 or bf16')
         targets=[]
         for name, module in list(self.hf.named_modules()):
             if isinstance(module, torch.nn.Linear) and 'language_model.layers.' in name:
@@ -55,19 +40,38 @@ class OCRModel(ArsenalModule):
                 # are excluded because some kernels access weights directly.
                 if name.rsplit('.',1)[-1] not in {'q_proj','k_proj','v_proj','o_proj','gate_proj','up_proj','down_proj'}: continue
                 parent, attr = name.rsplit('.',1)
-                setattr(self.hf.get_submodule(parent),attr,LowRankLinear(module))
+                setattr(self.hf.get_submodule(parent),attr,LowRankLinear(module,compute_dtype=lora_compute_dtype))
                 targets.append(name)
         assert targets, 'No verified language projection targets'
         self.hf.config.use_cache=False
         self.hf.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant':False})
         self.hf.enable_input_require_grads()
         (ROOT/'logs/adapter-targets.json').write_text(json.dumps(targets,indent=2))
+        print('LORA_COMPUTE_DTYPE',lora_compute_dtype,flush=True)
         print('ADAPTER_TARGETS',len(targets),'TRAINABLE',sum(p.numel() for p in self.parameters() if p.requires_grad),flush=True)
     def __call__(self, batch): return self.hf(**batch, use_cache=False).loss
 
 class OCRBatch(dict):
     def to(self, device, non_blocking=False):
         return OCRBatch({k:v.to(device=device,non_blocking=non_blocking) for k,v in self.items()})
+    def pin_memory(self):
+        return OCRBatch({k:(v.pin_memory() if isinstance(v,torch.Tensor) and v.device.type=='cpu' else v) for k,v in self.items()})
+
+def collate_ocr(rows, pad_token_id, pin_memory=True):
+    """Pad and concatenate examples, then pin the final batch once."""
+    if not rows:
+        raise ValueError('Cannot collate an empty OCR batch')
+    result={}; width=max(row['input_ids'].shape[1] for row in rows)
+    for key in rows[0]:
+        values=[row[key] for row in rows]
+        if key in ('input_ids','attention_mask','labels','mm_token_type_ids','token_type_ids'):
+            fill=-100 if key=='labels' else pad_token_id if key=='input_ids' else 0
+            values=[torch.nn.functional.pad(value,(0,width-value.shape[1]),value=fill) for value in values]
+        elif key not in ('pixel_values','image_grid_thw'):
+            raise ValueError('Unvalidated processor batch field: '+key)
+        result[key]=torch.cat(values,dim=0)
+    batch=OCRBatch(result)
+    return batch.pin_memory() if pin_memory else batch
 
 class OCRLoader(BaseDataloader):
     def __init__(self, path, model_path, split='train'):
@@ -118,10 +122,24 @@ class OCRTrainer(BaseTrainer[OCRConfig,BaseBatch]):
         self.last_loss=float(loss.detach())
         return loss
     def optimizer_step(self):
-        norm=torch.nn.utils.clip_grad_norm_(self.get_parameters(),1.0,error_if_nonfinite=True)
-        assert torch.isfinite(norm) and norm>0, 'Invalid gradient norm'
+        # Clip without throwing locally, then coordinate the decision across
+        # ranks. A single rank must not exit while its peers enter the next DDP
+        # collective. This performs one health collective per optimizer update.
+        norm=torch.nn.utils.clip_grad_norm_(self.get_parameters(),1.0,error_if_nonfinite=False)
+        healthy=torch.isfinite(norm) & (norm>0)
+        window_finite=getattr(self,'_window_finite',None)
+        if window_finite is not None:
+            healthy=healthy & window_finite.to(device=norm.device,dtype=torch.bool)
+        healthy=healthy.to(dtype=torch.int32)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(healthy,op=torch.distributed.ReduceOp.MIN)
+        self._window_finite=None
+        if not bool(healthy.item()):
+            raise FloatingPointError('Nonfinite loss/gradient or zero gradient on at least one rank')
         super().optimizer_step()
-        print(json.dumps({'step':self.clock.step_index,'loss':self.last_loss,'gradient_norm':float(norm),'lr':self.optimizer.param_groups[0]['lr']}),flush=True)
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()) or torch.distributed.get_rank()==0:
+            last_loss=float(self.last_loss) if isinstance(self.last_loss,torch.Tensor) else self.last_loss
+            print(json.dumps({'step':self.clock.step_index,'loss':last_loss,'gradient_norm':float(norm),'lr':self.optimizer.param_groups[0]['lr']}),flush=True)
     def adapter_state(self): return {n:p.detach().cpu().clone() for n,p in self.models['model'].named_parameters() if p.requires_grad}
     def save(self,path):
         state={'adapter':self.adapter_state(),'optimizer':self.optimizer.state_dict(),'clock':self.clock.state_dict(),'loader':self.dataloader.state_dict(),'rng':self.config.rng.state_dict(),'python_rng':random.getstate(),'numpy_rng':np.random.get_state(),'torch_rng':torch.get_rng_state(),'cuda_rng':torch.cuda.get_rng_state_all(),'scheduler_step':self.clock.step_index,'config':self.config.model_dump_json()}

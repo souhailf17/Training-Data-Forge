@@ -66,6 +66,8 @@ scripts/launch_optimized_resume_gpu4_m3_from7878_v1.py
 
 The launcher requests four GPUs and leaves node placement to the OpenShift scheduler. Review project-specific paths, Secret names and resource limits before running it in another namespace.
 
+The isolated performance candidates and their required rollout gates are documented in [`docs/optimization-branch-2026-10-03.md`](docs/optimization-branch-2026-10-03.md). They are not deployed by this repository change; BF16 LoRA and microbatch 4 remain explicit preflight experiments.
+
 ## Validation evidence
 
 The 2 October snapshot evaluates on the same fixed 256-example validation set. A separate, group-disjoint held-out OCR evaluation with CER/WER and page-completeness measurements remains necessary to assess OCR quality. Lower cross-entropy alone is not an OCR accuracy score.

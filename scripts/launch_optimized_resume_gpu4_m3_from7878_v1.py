@@ -43,7 +43,7 @@ pod["terminationGracePeriodSeconds"] = 600
 files = [
     "train_optimized_resume_gpu4_m3_from7878_v1.py", "train_optimized.py", "ordered_prefetch.py",
     "pilot_train.py", "large_batch.py", "distributed_ocr.py", "train_full.py",
-    "arsenal_ocr.py", "stage_training.py", "s3_common.py",
+    "arsenal_ocr.py", "lora.py", "training_config.py", "stage_training.py", "s3_common.py",
 ]
 data = {name: (ROOT / "scripts" / name).read_text(encoding="utf-8") for name in files}
 data["model-tree.json"] = (ROOT / "evidence" / "model-tree.json").read_text(encoding="utf-8")
